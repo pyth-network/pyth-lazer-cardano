@@ -3,7 +3,7 @@ version = "0.0.0"
 compiler = "v1.1.21"
 plutus = "v3"
 license = "Apache-2.0"
-description = "Aiken contracts for project 'pyth-network/pyth-lazer-cardano'"
+description = "Pyth Lazer on-chain SDK for Cardano"
 
 [repository]
 user = "pyth-network"
