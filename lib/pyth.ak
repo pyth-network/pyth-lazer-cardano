@@ -3,9 +3,10 @@ use aiken/collection/pairs
 use aiken/crypto.{ScriptHash}
 use aiken/math/rational
 use cardano/address.{Script}
-use cardano/transaction.{Redeemer, ScriptPurpose, Withdraw}
+use cardano/assets.{PolicyId}
+use cardano/transaction.{InlineDatum, Transaction, ValidityRange, Withdraw}
 use parser.{Parser, parse}
-use pyth/message
+use pyth/message.{TrustedSigners}
 use types/i16
 use types/i64
 use types/u16.{U16}
@@ -15,19 +16,44 @@ use types/u8.{U8}
 
 const price_update_magic_le = #"75d3c793"
 
+pub type Governance {
+  wormhole: PolicyId,
+  emitter_chain: Int,
+  emitter_address: ByteArray,
+  seen_sequence: Int,
+}
+
+pub type Pyth {
+  governance: Governance,
+  trusted_signers: TrustedSigners,
+  deprecated_withdraw_scripts: Pairs<ValidityRange, ScriptHash>,
+  withdraw_script: ScriptHash,
+}
+
 pub type PriceUpdate {
   timestamp_us: U64,
   channel_id: U8,
   feeds: List<Feed>,
 }
 
-// TODO: this should take policy ID, and retrieve withdraw script hash through
-// reference input instead
-pub fn get_updates(
-  script: ScriptHash,
-  redeemers: Pairs<ScriptPurpose, Redeemer>,
-) -> List<PriceUpdate> {
-  expect Some(redeemer) = pairs.get_first(redeemers, Withdraw(Script(script)))
+pub fn get_updates(pyth_id: PolicyId, self: Transaction) -> List<PriceUpdate> {
+  expect Some(state) =
+    list.find_map(
+      self.reference_inputs,
+      fn(input) {
+        if assets.has_nft_strict(input.output.value, pyth_id, "Pyth State") {
+          // state token outside of script address would imply a bug
+          expect Script(_) = input.output.address.payment_credential
+          expect InlineDatum(state) = input.output.datum
+          expect state: Pyth = state
+          Some(state)
+        } else {
+          None
+        }
+      },
+    )
+  expect Some(redeemer) =
+    pairs.get_first(self.redeemers, Withdraw(Script(state.withdraw_script)))
   expect updates: List<ByteArray> = redeemer
   list.map(
     updates,
