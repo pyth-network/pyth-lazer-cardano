@@ -1,10 +1,15 @@
 use aiken/collection/list
 use aiken/collection/pairs
 use aiken/crypto.{ScriptHash}
+use aiken/interval
 use aiken/math/rational
-use cardano/address.{Script}
+use aiken/option
+use cardano/address.{Address, Script}
 use cardano/assets.{PolicyId}
-use cardano/transaction.{InlineDatum, Transaction, ValidityRange, Withdraw}
+use cardano/transaction.{
+  InlineDatum, Input, Output, OutputReference, Redeemer, Transaction,
+  ValidityRange, Withdraw,
+}
 use parser.{Parser, parse}
 use pyth/message.{TrustedSigners}
 use types/i16
@@ -52,8 +57,7 @@ pub fn get_updates(pyth_id: PolicyId, self: Transaction) -> List<PriceUpdate> {
         }
       },
     )
-  expect Some(redeemer) =
-    pairs.get_first(self.redeemers, Withdraw(Script(state.withdraw_script)))
+  expect Some(redeemer) = current_withdraw_script_redeemer(self, state)
   expect updates: List<ByteArray> = redeemer
   list.map(
     updates,
@@ -62,6 +66,27 @@ pub fn get_updates(pyth_id: PolicyId, self: Transaction) -> List<PriceUpdate> {
       parse_update(message.payload)
     },
   )
+}
+
+fn current_withdraw_script_redeemer(
+  self: Transaction,
+  state: Pyth,
+) -> Option<Redeemer> {
+  pairs.get_first(self.redeemers, Withdraw(Script(state.withdraw_script)))
+    |> option.or_try(
+        fn() {
+          list.find_map(
+            state.deprecated_withdraw_scripts,
+            fn(Pair(r, s)) {
+              if interval.includes(r, self.validity_range) {
+                pairs.get_first(self.redeemers, Withdraw(Script(s)))
+              } else {
+                None
+              }
+            },
+          )
+        },
+      )
 }
 
 fn parse_update(payload: ByteArray) -> PriceUpdate {
@@ -430,4 +455,62 @@ test parses_update() {
   expect Some(None) = feed112.ema_confidence
   expect Some(Some(feed_update_timestamp112)) = feed112.feed_update_timestamp
   expect u64.as_int(feed_update_timestamp112) == 1772613309000 * 1000
+}
+
+fn test_withdraw_state(
+  mint: PolicyId,
+  withdraw: ScriptHash,
+  deprecated: Pairs<ValidityRange, ScriptHash>,
+) {
+  Pyth(Governance(mint, 0, #"", 0), [], deprecated, withdraw)
+}
+
+fn test_withdraw_tx(mint: PolicyId, withdraw: ScriptHash, state: Pyth) {
+  let raw_updates: Data = [test_update]
+  Transaction {
+    ..transaction.placeholder,
+    validity_range: interval.between(42, 43),
+    reference_inputs: [
+      Input(
+        OutputReference(#"", 0),
+        Output {
+          address: Address(Script(#""), None),
+          value: assets.from_asset(mint, "Pyth State", 1),
+          datum: InlineDatum(state),
+          reference_script: None,
+        },
+      ),
+    ],
+    redeemers: [Pair(Withdraw(Script(withdraw)), raw_updates)],
+  }
+}
+
+test gets_updates_with_current_script() {
+  let state = test_withdraw_state(#"feed", #"900d", [])
+  let tx = test_withdraw_tx(#"feed", #"900d", state)
+  expect [_] = get_updates(#"feed", tx)
+}
+
+test fails_updates_with_incorrect_script() fail {
+  let state = test_withdraw_state(#"feed", #"900d", [])
+  let tx = test_withdraw_tx(#"feed", #"1bad", state)
+  expect [_] = get_updates(#"feed", tx)
+}
+
+test gets_updates_with_deprecated_script() {
+  let state =
+    test_withdraw_state(#"feed", #"900d", [Pair(interval.everything, #"101d")])
+  let tx = test_withdraw_tx(#"feed", #"101d", state)
+  expect [_] = get_updates(#"feed", tx)
+}
+
+test fails_updates_with_expired_script() fail {
+  let state =
+    test_withdraw_state(
+      #"feed",
+      #"900d",
+      [Pair(interval.between(1, 2), #"101d")],
+    )
+  let tx = test_withdraw_tx(#"feed", #"101d", state)
+  expect [_] = get_updates(#"feed", tx)
 }
